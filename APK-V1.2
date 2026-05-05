@@ -1,0 +1,581 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  onAuthStateChanged, 
+  signOut,
+  signInAnonymously,
+  signInWithCustomToken
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  onSnapshot, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query 
+} from 'firebase/firestore';
+import { 
+  Trophy, 
+  Users, 
+  Settings, 
+  LogOut, 
+  CheckCircle, 
+  XCircle, 
+  Download, 
+  Trash2,
+  Image as ImageIcon,
+  ChevronRight,
+  ChevronLeft,
+  CreditCard,
+  FileText,
+  AlertTriangle,
+  Sparkles,
+  Zap,
+  MessageSquare
+} from 'lucide-react';
+
+// --- Konfigurasi Firebase & Gemini ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'tournament-pro-v1';
+const apiKey = ""; // API Key disediakan oleh lingkungan runtime
+
+// --- Helper Gemini API ---
+const callGemini = async (prompt, systemInstruction = "") => {
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: systemInstruction }] }
+      })
+    });
+    
+    if (!response.ok) throw new Error('Gemini API call failed');
+    
+    const result = await response.json();
+    return result.candidates?.[0]?.content?.parts?.[0]?.text || "Maaf, AI sedang sibuk.";
+  } catch (err) {
+    console.error("Gemini Error:", err);
+    return "Terjadi kesalahan saat memproses permintaan AI.";
+  }
+};
+
+// --- Komponen Utama ---
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [view, setView] = useState('home'); 
+  const [registrations, setRegistrations] = useState([]);
+  const [authError, setAuthError] = useState(null);
+  const [settings, setSettings] = useState({
+    slider: ["https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800"],
+    rulesText: "1. Junjung sportivitas.\n2. No Cheat.\n3. Telat 15 menit Diskualifikasi.",
+    slotMax: 32,
+    isPaymentOn: true,
+    qrisUrl: "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=CONTOH-PEMBAYARAN",
+    rulesFileUrl: "#",
+    rulesFileName: "Rules_Tournament.docx"
+  });
+
+  // RULE 3: Auth Before Queries - Inisialisasi Auth Terlebih Dahulu
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+        // Menangani error unauthorized-domain agar user tetap bisa melihat konten publik jika memungkinkan
+        if (err.code === 'auth/unauthorized-domain') {
+          setAuthError("Domain ini belum terdaftar di Firebase Console. Silakan tambahkan domain ini ke 'Authorized Domains' di Firebase Auth.");
+        }
+      }
+    };
+    initAuth();
+
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      // Logika admin sederhana untuk demo
+      if (u?.email === "admin@tournament.com" || (u && u.isAnonymous)) {
+        setIsAdmin(true);
+      } else {
+        setIsAdmin(false);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Ambil Data Firestore Setelah Auth Berhasil
+  useEffect(() => {
+    if (!user) return;
+
+    // Ambil Pengaturan
+    const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+    const unsubSettings = onSnapshot(settingsDoc, (snap) => {
+      if (snap.exists()) {
+        setSettings(snap.data());
+      } else {
+        // Inisialisasi settings jika belum ada
+        setDoc(settingsDoc, settings);
+      }
+    }, (error) => console.error("Settings listener error:", error));
+
+    // Ambil Registrasi
+    const regCol = collection(db, 'artifacts', appId, 'public', 'data', 'registrations');
+    const unsubReg = onSnapshot(regCol, (snap) => {
+      setRegistrations(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (error) => console.error("Registrations listener error:", error));
+
+    return () => {
+      unsubSettings();
+      unsubReg();
+    };
+  }, [user]);
+
+  const confirmedTeams = useMemo(() => 
+    registrations.filter(r => r.status === 'confirmed').length
+  , [registrations]);
+
+  const handleGoogleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+      setAuthError(null);
+    } catch (err) {
+      console.error("Login error:", err);
+      if (err.code === 'auth/unauthorized-domain') {
+        setAuthError("Gagal Login: Domain ini tidak diizinkan. Harap hubungi Admin.");
+      }
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
+      {authError && (
+        <div className="bg-red-600 text-white px-6 py-2 text-center text-sm font-bold flex items-center justify-center gap-2">
+          <AlertTriangle size={16} /> {authError}
+        </div>
+      )}
+
+      <nav className="bg-white border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50">
+        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setView('home')}>
+          <div className="bg-indigo-600 p-2 rounded-lg text-white">
+            <Trophy size={24} />
+          </div>
+          <span className="font-black text-xl tracking-tighter">TOURNAMENT.ID</span>
+        </div>
+
+        <div className="flex items-center gap-4">
+          {isAdmin && (
+            <button 
+              onClick={() => setView('admin')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold transition ${view === 'admin' ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-100'}`}
+            >
+              <Settings size={18} /> Admin Panel
+            </button>
+          )}
+          
+          {(!user || user.isAnonymous) ? (
+            <button 
+              onClick={handleGoogleLogin}
+              className="bg-indigo-600 text-white px-5 py-2 rounded-full text-sm font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition"
+            >
+              Login Google
+            </button>
+          ) : (
+            <div className="flex items-center gap-3">
+              <img 
+                src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || 'User'}`} 
+                alt="profile" 
+                className="w-8 h-8 rounded-full border" 
+              />
+              <button 
+                onClick={() => signOut(auth)} 
+                className="text-slate-400 hover:text-red-500 transition"
+              >
+                <LogOut size={20} />
+              </button>
+            </div>
+          )}
+        </div>
+      </nav>
+
+      <main className="max-w-6xl mx-auto p-6">
+        {view === 'home' && <HomeView settings={settings} confirmedTeams={confirmedTeams} setView={setView} />}
+        {view === 'register' && <RegisterView settings={settings} setView={setView} user={user} />}
+        {view === 'admin' && <AdminDashboard settings={settings} registrations={registrations} db={db} appId={appId} />}
+      </main>
+    </div>
+  );
+}
+
+// --- SUB-COMPONENTS ---
+
+function HomeView({ settings, confirmedTeams, setView }) {
+  const [idx, setIdx] = useState(0);
+  const [aiNarrative, setAiNarrative] = useState("");
+  const [loadingAi, setLoadingAi] = useState(false);
+
+  const generateNarrative = async () => {
+    setLoadingAi(true);
+    const prompt = `Buatlah narasi promosi singkat yang membara dan epik untuk turnamen dengan aturan berikut: ${settings.rulesText}. Maksimal 3 kalimat.`;
+    const res = await callGemini(prompt, "Kamu adalah seorang shoutcaster turnamen esport profesional yang energik.");
+    setAiNarrative(res);
+    setLoadingAi(false);
+  };
+
+  return (
+    <div className="space-y-8 animate-in fade-in duration-700">
+      <div className="relative h-[500px] overflow-hidden group rounded-3xl shadow-2xl">
+        <img 
+          src={settings.slider[idx] || "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800"} 
+          className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105" 
+          alt="Banner" 
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/40 to-transparent flex flex-col justify-end p-12 text-white">
+          <h1 className="text-6xl font-black mb-4 uppercase tracking-tighter">Esports Championship</h1>
+          
+          <div className="mb-6 max-w-2xl bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/20">
+             <button 
+              onClick={generateNarrative}
+              disabled={loadingAi}
+              className="flex items-center gap-2 text-indigo-300 font-bold text-xs uppercase tracking-widest mb-2 hover:text-white transition"
+             >
+               <Sparkles size={14} /> {loadingAi ? "Membayangkan..." : "Dengarkan Narasi AI ✨"}
+             </button>
+             <p className="text-lg opacity-90 leading-relaxed italic">
+               {aiNarrative || "Siapkan tim terbaikmu, dominasi arena, dan raih kemenangan abadi!"}
+             </p>
+          </div>
+
+          <div className="flex items-center gap-6">
+            <button 
+              onClick={() => setView('register')}
+              className="bg-indigo-600 text-white px-10 py-5 rounded-2xl font-black text-xl hover:bg-indigo-500 transition shadow-xl shadow-indigo-500/30 flex items-center gap-3"
+            >
+              DAFTAR SEKARANG <ChevronRight size={24} />
+            </button>
+            <div className="px-6 py-4 rounded-2xl border border-white/20 bg-white/5 backdrop-blur-sm">
+              <p className="text-xs font-bold uppercase tracking-widest opacity-60">Kuota Tim</p>
+              <p className="text-3xl font-black text-indigo-400">{confirmedTeams} / {settings.slotMax}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RegisterView({ settings, setView, user }) {
+  const [formData, setFormData] = useState({
+    teamName: '', teamLogo: '', playerCount: 5,
+    players: Array(5).fill(null).map(() => ({ name: '', uid: '' })),
+    paymentProof: ''
+  });
+  const [aiSuggestion, setAiSuggestion] = useState("");
+  const [loadingAi, setLoadingAi] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const getAiHelp = async () => {
+    setLoadingAi(true);
+    const prompt = `Berikan 3 saran nama tim keren dan 1 tips strategi untuk tim dengan ${formData.playerCount} pemain.`;
+    const res = await callGemini(prompt, "Kamu adalah konsultan branding esport.");
+    setAiSuggestion(res);
+    setLoadingAi(false);
+  };
+
+  const handleSubmit = async () => {
+    if (!user) {
+      alert("Harap login terlebih dahulu.");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'registrations'), {
+        ...formData,
+        userId: user.uid,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      });
+      alert("Pendaftaran berhasil dikirim! Silakan tunggu konfirmasi admin.");
+      setView('home');
+    } catch (e) { 
+      console.error(e);
+      alert("Terjadi kesalahan saat mendaftar. Pastikan data sudah benar.");
+    }
+    setIsSubmitting(false);
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-in slide-in-from-bottom-4 duration-500">
+      <div className="lg:col-span-2 space-y-6">
+        <section className="bg-white p-8 rounded-3xl border shadow-sm">
+          <div className="flex justify-between items-center mb-6">
+            <h2 className="text-2xl font-black flex items-center gap-2"><Users className="text-indigo-600" /> Registrasi Tim</h2>
+            <button 
+              onClick={getAiHelp}
+              className="flex items-center gap-2 bg-indigo-50 text-indigo-600 px-4 py-2 rounded-xl font-bold text-sm hover:bg-indigo-100 transition"
+            >
+              <Zap size={16} /> {loadingAi ? "Berpikir..." : "Saran Nama & Strategi ✨"}
+            </button>
+          </div>
+
+          {aiSuggestion && (
+            <div className="mb-8 p-4 bg-indigo-50 border border-indigo-100 rounded-2xl text-sm leading-relaxed text-indigo-800 whitespace-pre-wrap">
+              <Sparkles size={16} className="mb-2" />
+              {aiSuggestion}
+            </div>
+          )}
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 uppercase ml-1">Nama Tim</label>
+              <input 
+                className="w-full px-4 py-3 bg-slate-50 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="Contoh: Garuda Esports"
+                value={formData.teamName}
+                onChange={e => setFormData({...formData, teamName: e.target.value})}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-slate-400 uppercase ml-1">URL Logo Tim</label>
+              <input 
+                className="w-full px-4 py-3 bg-slate-50 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="https://link-logo.png"
+                value={formData.teamLogo}
+                onChange={e => setFormData({...formData, teamLogo: e.target.value})}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-4">
+             <p className="text-sm font-bold text-slate-500 uppercase tracking-widest">Daftar Pemain Utama</p>
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {formData.players.map((p, i) => (
+                  <div key={i} className="flex gap-2 bg-slate-50 p-2 rounded-xl border">
+                    <input 
+                      className="w-1/2 px-3 py-2 bg-white border rounded-lg text-sm" 
+                      placeholder={`Nama P${i+1}`}
+                      value={p.name}
+                      onChange={e => {
+                        const n = [...formData.players]; n[i].name = e.target.value;
+                        setFormData({...formData, players: n});
+                      }}
+                    />
+                    <input 
+                      className="w-1/2 px-3 py-2 bg-white border rounded-lg text-sm" 
+                      placeholder="UID In-game"
+                      value={p.uid}
+                      onChange={e => {
+                        const n = [...formData.players]; n[i].uid = e.target.value;
+                        setFormData({...formData, players: n});
+                      }}
+                    />
+                  </div>
+                ))}
+             </div>
+          </div>
+        </section>
+
+        {settings.isPaymentOn && (
+          <section className="bg-white p-8 rounded-3xl border shadow-sm flex flex-col md:flex-row gap-8 items-center">
+            <div className="flex flex-col items-center gap-2">
+              <img src={settings.qrisUrl} className="w-48 h-48 border-4 border-slate-100 rounded-2xl" alt="QRIS" />
+              <span className="text-[10px] font-bold text-slate-400 uppercase">Scan QRIS untuk Bayar</span>
+            </div>
+            <div className="space-y-4 flex-1 w-full">
+              <h3 className="font-bold flex items-center gap-2"><CreditCard /> Bukti Pembayaran</h3>
+              <p className="text-xs text-slate-500">Silakan unggah bukti transfer ke layanan hosting gambar (seperti Imgur/PostImage) dan masukkan link-nya di bawah ini.</p>
+              <input 
+                className="w-full px-4 py-3 bg-slate-50 border rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="https://imgur.com/bukti-bayar.jpg"
+                value={formData.paymentProof}
+                onChange={e => setFormData({...formData, paymentProof: e.target.value})}
+              />
+            </div>
+          </section>
+        )}
+      </div>
+
+      <div className="bg-white p-8 rounded-3xl border shadow-sm h-fit sticky top-24 space-y-6">
+        <h3 className="font-black text-xl uppercase tracking-tighter border-b pb-4">Ringkasan Tim</h3>
+        <ul className="space-y-3 text-sm font-medium text-slate-500">
+          <li className="flex justify-between">Nama Tim: <span className="text-slate-900 truncate ml-4 font-bold">{formData.teamName || "-"}</span></li>
+          <li className="flex justify-between">Total Pemain: <span className="text-slate-900 font-bold">{formData.players.filter(p=>p.name).length}</span></li>
+          <li className="flex justify-between">Biaya Pendaftaran: <span className="text-indigo-600 font-black">Rp 50.000</span></li>
+          <li className="flex justify-between">Bukti Bayar: <span>{formData.paymentProof ? <span className="text-green-600 font-bold">Terlampir</span> : <span className="text-red-400">Belum ada</span>}</span></li>
+        </ul>
+        <button 
+          onClick={handleSubmit}
+          disabled={isSubmitting || !formData.teamName || (settings.isPaymentOn && !formData.paymentProof)}
+          className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-lg hover:bg-indigo-700 transition disabled:bg-slate-200 disabled:text-slate-400 shadow-xl shadow-indigo-200"
+        >
+          {isSubmitting ? "MENGIRIM..." : "SUBMIT SEKARANG"}
+        </button>
+        <p className="text-[10px] text-center text-slate-400 font-medium">Dengan menekan tombol, Anda menyetujui seluruh peraturan turnamen yang berlaku.</p>
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboard({ settings, registrations, db, appId }) {
+  const [activeTab, setActiveTab] = useState('pendaftar');
+  const [aiInsight, setAiInsight] = useState({});
+  const [loadingAi, setLoadingAi] = useState(null);
+
+  const getInsight = async (reg) => {
+    setLoadingAi(reg.id);
+    const prompt = `Berikan rangkuman singkat (1 kalimat) tentang tim "${reg.teamName}" yang mendaftar dengan ${reg.players.length} pemain. Apakah terlihat seperti tim yang siap bertanding?`;
+    const res = await callGemini(prompt, "Kamu adalah analis administrasi turnamen.");
+    setAiInsight(prev => ({ ...prev, [reg.id]: res }));
+    setLoadingAi(null);
+  };
+
+  return (
+    <div className="bg-white rounded-3xl border shadow-xl overflow-hidden min-h-[600px] animate-in zoom-in-95 duration-300">
+      <div className="flex bg-slate-50 border-b">
+        <button onClick={() => setActiveTab('pendaftar')} className={`px-8 py-4 font-bold text-sm transition ${activeTab === 'pendaftar' ? 'bg-white text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>DAFTAR PENDAFTAR</button>
+        <button onClick={() => setActiveTab('settings')} className={`px-8 py-4 font-bold text-sm transition ${activeTab === 'settings' ? 'bg-white text-indigo-600 border-b-2 border-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>PENGATURAN GLOBAL</button>
+      </div>
+
+      <div className="p-8">
+        {activeTab === 'pendaftar' && (
+          <div className="space-y-4">
+            <div className="flex justify-between items-center mb-6">
+               <h3 className="font-black text-2xl uppercase tracking-tighter">Manajemen Tim ({registrations.length})</h3>
+               <div className="flex gap-2">
+                  <span className="flex items-center gap-1 text-xs font-bold text-green-600 bg-green-50 px-3 py-1 rounded-full border border-green-100">
+                    Confirmed: {registrations.filter(r=>r.status==='confirmed').length}
+                  </span>
+                  <span className="flex items-center gap-1 text-xs font-bold text-amber-600 bg-amber-50 px-3 py-1 rounded-full border border-amber-100">
+                    Pending: {registrations.filter(r=>r.status==='pending').length}
+                  </span>
+               </div>
+            </div>
+
+            {registrations.length === 0 && (
+              <div className="py-20 text-center text-slate-300">
+                <Users size={48} className="mx-auto mb-4 opacity-20" />
+                <p className="font-bold">Belum ada tim yang mendaftar.</p>
+              </div>
+            )}
+
+            {registrations.map(reg => (
+              <div key={reg.id} className="p-6 border rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-6 bg-white hover:border-indigo-200 transition shadow-sm hover:shadow-md">
+                <div className="flex items-center gap-4 flex-1">
+                  <div className="relative">
+                    <img src={reg.teamLogo || "https://via.placeholder.com/150"} className="w-16 h-16 rounded-2xl object-cover border bg-slate-50" alt="logo" />
+                    {reg.status === 'confirmed' && (
+                      <div className="absolute -top-2 -right-2 bg-green-500 text-white p-1 rounded-full border-2 border-white">
+                        <CheckCircle size={12} />
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="font-black text-xl uppercase tracking-tighter">{reg.teamName}</h4>
+                    <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">{reg.players.length} Pemain Utama</p>
+                    
+                    {aiInsight[reg.id] ? (
+                      <div className="mt-2 text-xs text-indigo-600 bg-indigo-50/50 p-2 rounded-lg border border-indigo-100 flex items-start gap-2">
+                        <Sparkles size={14} className="shrink-0 mt-0.5" />
+                        <p className="italic">"{aiInsight[reg.id]}"</p>
+                      </div>
+                    ) : (
+                      <button 
+                        onClick={() => getInsight(reg)}
+                        disabled={loadingAi === reg.id}
+                        className="mt-2 flex items-center gap-1 text-[10px] font-black text-indigo-500 hover:text-indigo-700 transition"
+                      >
+                        <Zap size={12} /> {loadingAi === reg.id ? "MENILAI TIM..." : "TANYA ANALISIS AI ✨"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 bg-slate-50 p-2 rounded-2xl border">
+                  {reg.paymentProof && (
+                    <button 
+                      onClick={() => window.open(reg.paymentProof)} 
+                      title="Lihat Bukti Bayar"
+                      className="p-3 bg-white text-indigo-600 rounded-xl hover:bg-indigo-600 hover:text-white transition shadow-sm"
+                    >
+                      <CreditCard size={20}/>
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'registrations', reg.id), {status: 'confirmed'})} 
+                    title="Konfirmasi Tim"
+                    className="p-3 bg-white text-green-600 rounded-xl hover:bg-green-600 hover:text-white transition shadow-sm"
+                  >
+                    <CheckCircle size={20}/>
+                  </button>
+                  <button 
+                    onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'registrations', reg.id))} 
+                    title="Hapus / Tolak"
+                    className="p-3 bg-white text-red-600 rounded-xl hover:bg-red-600 hover:text-white transition shadow-sm"
+                  >
+                    <Trash2 size={20}/></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {activeTab === 'settings' && (
+           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="space-y-4">
+                <label className="block text-xs font-black text-slate-400 uppercase tracking-widest">Aturan & Regulasi</label>
+                <textarea 
+                  className="w-full h-64 p-4 bg-slate-50 border rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                  value={settings.rulesText}
+                  placeholder="Masukkan poin-poin aturan turnamen..."
+                  onChange={e => setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), { rulesText: e.target.value }, { merge: true })}
+                />
+                <p className="text-[10px] text-slate-400">Aturan ini akan digunakan oleh AI untuk membuat narasi promosi di halaman utama.</p>
+              </div>
+              <div className="space-y-6">
+                <div className="space-y-2">
+                  <label className="block text-xs font-black text-slate-400 uppercase tracking-widest">Link QRIS Pembayaran</label>
+                  <input 
+                    className="w-full p-4 bg-slate-50 border rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                    value={settings.qrisUrl}
+                    placeholder="https://link-gambar-qris.jpg"
+                    onChange={e => setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), { qrisUrl: e.target.value }, { merge: true })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-xs font-black text-slate-400 uppercase tracking-widest">Maksimal Slot Tim</label>
+                  <input 
+                    type="number"
+                    className="w-full p-4 bg-slate-50 border rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                    value={settings.slotMax}
+                    onChange={e => setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config'), { slotMax: parseInt(e.target.value) }, { merge: true })}
+                  />
+                </div>
+                <div className="p-6 bg-amber-50 rounded-2xl border border-amber-100 flex gap-4">
+                  <AlertTriangle className="text-amber-500 shrink-0" />
+                  <div>
+                    <p className="text-xs font-bold text-amber-800 uppercase mb-1">Peringatan Admin</p>
+                    <p className="text-[11px] text-amber-700 leading-relaxed">Pastikan semua URL gambar yang dimasukkan menggunakan protokol HTTPS dan dapat diakses secara publik. Jika login Google gagal, pastikan domain diizinkan di Firebase Console.</p>
+                  </div>
+                </div>
+              </div>
+           </div>
+        )}
+      </div>
+    </div>
+  );
+}
